@@ -167,5 +167,204 @@ Perfect for serving multiple clients with enterprise-grade security and performa
 ---
 
 ---
+# 🔥 Hybrid Architecture: REST API + MCP Protocol
+
+## What We Built
+
+We've enhanced your M-Pesa SaaS platform to support **dual protocol communication** - making it accessible to both **human clients** and **AI systems** simultaneously, while maintaining all existing functionality.
+
+---
+
+## 🏗️ Architecture Overview
+
+Your system now operates as a **true hybrid server** that can serve two types of clients:
+
+```
+┌─────────────────┐    HTTP/REST     ┌──────────────────┐
+│   Web Apps      │ ◄─────────────► │                  │
+│   Mobile Apps   │                  │                  │
+│   Dashboards    │                  │                  │
+└─────────────────┘                  │                  │
+                                     │   YOUR M-PESA    │
+┌─────────────────┐   MCP Protocol   │   HYBRID SERVER  │
+│   Claude AI     │ ◄─────────────► │                  │
+│   GPT Models    │                  │                  │
+│   AI Assistants │                  │                  │
+└─────────────────┘                  └──────────────────┘
+```
+
+---
+
+## 🔧 Technical Implementation
+
+### 1. **Zero Code Duplication**
+- **Same business logic** serves both protocols
+- **Single service layer** (`services/mpesa_service.py`) handles all M-Pesa operations
+- **Identical functionality** whether called via REST or MCP
+
+### 2. **Protocol Layer Separation**
+```
+REST API (routes/)     MCP Server (mcp/)
+      ↓                       ↓
+   Same Business Logic (services/)
+      ↓                       ↓
+   Same Database Layer (models/)
+```
+
+### 3. **Multi-Tenant Architecture Preserved**
+- **Organization isolation** works for both REST and MCP clients
+- **Rate limiting** applies to both protocols
+- **Audit logging** tracks both REST and MCP requests
+- **Credential management** secured for both access methods
+
+---
+
+## 📁 Updated Directory Structure
+
+```text
+mpesa_mcp/
+├── mcp/                       # 🆕 MCP Protocol Support
+│   ├── __init__.py
+│   └── server.py              # MCP server with tool definitions
+├── main.py                    # 🔄 Enhanced: Dual protocol support
+├── routes/                    # ✅ Unchanged: Existing REST API
+├── services/                  # ✅ Unchanged: Same business logic
+├── models/                    # ✅ Unchanged: Same data layer
+├── middleware/                # ✅ Unchanged: Same security
+└── utils/                     # ✅ Unchanged: Same utilities
+```
+
+---
+
+## 🛠️ MCP Tools Exposed
+
+Your M-Pesa functionality is now available as **7 standardized MCP tools**:
+
+| MCP Tool | Function | Description |
+|----------|----------|-------------|
+| `mpesa_stk_push` | Collect payments | Initiate STK Push to customer phone |
+| `mpesa_check_status` | Track payments | Check transaction status by ID |
+| `mpesa_check_balance` | Account monitoring | Get M-Pesa account balance |
+| `mpesa_bulk_payment` | Mass payouts | Process multiple B2C payments |
+| `mpesa_reverse_transaction` | Refunds | Reverse/refund transactions |
+| `mpesa_transaction_history` | Reporting | Get filtered transaction history |
+| `mpesa_generate_report` | Analytics | Generate financial reports |
+
+---
+
+## 🚀 Server Modes
+
+Your server now supports **3 operational modes**:
+
+```bash
+# Hybrid Mode (Default) - Serves both humans and AI
+python main.py --mode hybrid
+
+# REST Only - Traditional web/mobile API
+python main.py --mode rest  
+
+# MCP Only - AI integration server
+python main.py --mode mcp
+```
+
+---
+
+## 🔄 Request Flow Comparison
+
+### REST API Request (Humans)
+```http
+POST /tools/stk-push HTTP/1.1
+Authorization: Bearer jwt_token
+Content-Type: application/json
+
+{
+  "phone_number": "254712345678",
+  "amount": 100,
+  "account_reference": "ACC123",
+  "transaction_desc": "Payment for services"
+}
+```
+
+### MCP Tool Call (AI Systems)
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "mpesa_stk_push",
+    "arguments": {
+      "phone_number": "254712345678",
+      "amount": 100,
+      "account_reference": "ACC123",
+      "transaction_desc": "Payment for services",
+      "org_id": "org_123",
+      "user_id": "user_456"
+    }
+  }
+}
+```
+
+**Both execute the identical `mpesa_service.stk_push_payment()` function!**
+
+---
+
+## 💡 Key Benefits
+
+### **For Business**
+- **Expanded market reach**: Serve both human users AND AI systems
+- **Future-proof architecture**: Ready for AI integration trends
+- **Multiple revenue streams**: API access + AI tool licensing
+- **Zero migration cost**: Existing REST API clients unaffected
+
+### **For Developers**  
+- **Single codebase**: Maintain one system, serve two protocols
+- **Consistent behavior**: Same validation, logging, and error handling
+- **Easier testing**: Test business logic once, works for both protocols
+- **Modular design**: Add new tools without affecting REST API
+
+### **For AI Integration**
+- **Standardized interface**: MCP protocol compliance
+- **Rich tool descriptions**: AI systems understand available operations
+- **Type safety**: Structured input/output schemas
+- **Multi-tenant ready**: AI systems can serve multiple organizations
+
+---
+
+## 🔐 Security & Isolation Maintained
+
+- ✅ **Organization data isolation** enforced for both protocols
+- ✅ **Rate limiting** protects against abuse from any client type  
+- ✅ **Audit logging** tracks all operations regardless of protocol
+- ✅ **Multi-tenant security** preserved across both access methods
+- ✅ **Same validation rules** apply to REST and MCP requests
+
+---
+
+## 🎯 Use Cases Unlocked
+
+**Human Clients (REST API):**
+- Web dashboards for payment management
+- Mobile apps for customer payments
+- Admin panels for transaction monitoring
+- Integration with existing web systems
+
+**AI Clients (MCP Protocol):**
+- AI assistants processing payments via voice/chat
+- Automated payment workflows triggered by AI
+- AI-powered financial analysis and reporting
+- Smart payment routing and optimization
+
+---
+
+## 📊 Result: True Hybrid SaaS Platform
+
+You now have a **production-ready, multi-protocol M-Pesa platform** that:
+
+- 🌐 **Serves traditional web/mobile clients** via REST API
+- 🤖 **Enables AI system integration** via MCP protocol  
+- 🏢 **Maintains full multi-tenancy** across both protocols
+- 📈 **Scales horizontally** to serve multiple client types simultaneously
+- 🔒 **Preserves enterprise security** and data isolation
+
+**This hybrid architecture positions your platform at the forefront of both traditional SaaS and emerging AI integration markets.**
 
 
