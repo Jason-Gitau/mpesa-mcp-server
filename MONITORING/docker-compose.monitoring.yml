@@ -1,0 +1,825 @@
+# ==============================================================================
+# DOCKER COMPOSE - Complete Monitoring Stack
+# ==============================================================================
+# File: docker-compose.monitoring.yml
+
+version: '3.8'
+
+services:
+  # Your existing M-Pesa MCP application
+  mpesa-mcp:
+    build: .
+    ports:
+      - "5000:5000"      # Flask API
+      - "8000:8000"      # MCP Server  
+      - "9090:9090"      # Prometheus Metrics
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - MPESA_CONSUMER_KEY=${MPESA_CONSUMER_KEY}
+      - MPESA_CONSUMER_SECRET=${MPESA_CONSUMER_SECRET}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - EMAIL_ALERTS_ENABLED=true
+      - SMS_ALERTS_ENABLED=false
+      - PROMETHEUS_PORT=9090
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: mpesa_mcp
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./monitoring/sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and session management
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Prometheus - Metrics Collection
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    restart: unless-stopped
+    depends_on:
+      - mpesa-mcp
+
+  # Grafana - Monitoring Dashboards
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+  # AlertManager - Alert Routing and Management
+  alertmanager:
+    image: prom/alertmanager:latest
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.external-url=http://localhost:9093'
+    restart: unless-stopped
+
+  # Node Exporter - System Metrics
+  node-exporter:
+    image: prom/node-exporter:latest
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    restart: unless-stopped
+
+  # Cadvisor - Container Metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:
+
+networks:
+  default:
+    name: mpesa-monitoring-network
+
+---
+
+# ==============================================================================
+# PROMETHEUS CONFIGURATION
+# ==============================================================================
+# File: monitoring/prometheus/prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "alerts.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+scrape_configs:
+  # M-Pesa MCP Application Metrics
+  - job_name: 'mpesa-mcp'
+    static_configs:
+      - targets: ['mpesa-mcp:9090']
+    scrape_interval: 10s
+    metrics_path: '/metrics'
+
+  # System Metrics
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # Container Metrics
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  # Database Metrics (if postgres_exporter is added)
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+    scrape_interval: 30s
+
+  # Redis Metrics (if redis_exporter is added)
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+    scrape_interval: 30s
+
+---
+
+# ==============================================================================
+# PROMETHEUS ALERTS CONFIGURATION
+# ==============================================================================
+# File: monitoring/prometheus/alerts.yml
+
+groups:
+- name: mpesa_mcp_alerts
+  rules:
+  # Application Health Alerts
+  - alert: MPesaAppDown
+    expr: up{job="mpesa-mcp"} == 0
+    for: 30s
+    labels:
+      severity: critical
+    annotations:
+      summary: "M-Pesa MCP Application is down"
+      description: "M-Pesa MCP application has been down for more than 30 seconds"
+
+  - alert: HighResponseTime
+    expr: histogram_quantile(0.95, rate(mpesa_mcp_request_duration_seconds_bucket[5m])) > 5
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High response time detected"
+      description: "95th percentile response time is {{ $value }}s for the last 5 minutes"
+
+  - alert: HighErrorRate
+    expr: rate(mpesa_mcp_requests_total{status=~"5.."}[5m]) / rate(mpesa_mcp_requests_total[5m]) > 0.05
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "High error rate detected"
+      description: "Error rate is {{ $value | humanizePercentage }} for the last 5 minutes"
+
+  # M-Pesa API Alerts
+  - alert: MPesaAPIFailures
+    expr: rate(mpesa_api_calls_total{status="failed"}[5m]) > 0.1
+    for: 1m
+    labels:
+      severity: high
+    annotations:
+      summary: "High M-Pesa API failure rate"
+      description: "M-Pesa API failure rate is {{ $value }} failures/sec for organization {{ $labels.organization }}"
+
+  - alert: MPesaAPIHighLatency
+    expr: histogram_quantile(0.95, rate(mpesa_api_duration_seconds_bucket[5m])) > 10
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High M-Pesa API latency"
+      description: "M-Pesa API 95th percentile latency is {{ $value }}s"
+
+  - alert: MPesaTokenRefreshFailures
+    expr: increase(mpesa_token_refreshes_total{status="failed"}[10m]) > 3
+    for: 0s
+    labels:
+      severity: critical
+    annotations:
+      summary: "Multiple M-Pesa token refresh failures"
+      description: "{{ $value }} token refresh failures in the last 10 minutes for organization {{ $labels.organization }}"
+
+  # Database Alerts
+  - alert: DatabaseDown
+    expr: up{job="postgres"} == 0
+    for: 30s
+    labels:
+      severity: critical
+    annotations:
+      summary: "Database is down"
+      description: "PostgreSQL database has been down for more than 30 seconds"
+
+  - alert: HighDatabaseConnections
+    expr: mpesa_mcp_active_connections > 8
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High database connection usage"
+      description: "Database connection pool usage is {{ $value }}/10"
+
+  - alert: SlowDatabaseQueries
+    expr: histogram_quantile(0.95, rate(mpesa_db_query_duration_seconds_bucket[5m])) > 1
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Slow database queries detected"
+      description: "95th percentile database query time is {{ $value }}s"
+
+  # Security Alerts
+  - alert: FailedAuthenticationAttempts
+    expr: increase(mpesa_auth_attempts_total{status="failed"}[5m]) > 10
+    for: 0s
+    labels:
+      severity: high
+    annotations:
+      summary: "Multiple failed authentication attempts"
+      description: "{{ $value }} failed authentication attempts in 5 minutes for organization {{ $labels.organization }}"
+
+  - alert: CrossTenantAccessAttempts
+    expr: increase(mpesa_cross_tenant_attempts_total[5m]) > 0
+    for: 0s
+    labels:
+      severity: critical
+    annotations:
+      summary: "Cross-tenant access attempt detected"
+      description: "Cross-tenant access attempt from organization {{ $labels.user_org }} to {{ $labels.target_org }}"
+
+  - alert: SecurityEventSpike
+    expr: increase(mpesa_security_events_total[5m]) > 5
+    for: 0s
+    labels:
+      severity: high
+    annotations:
+      summary: "Security event spike detected"
+      description: "{{ $value }} security events of type {{ $labels.event_type }} in 5 minutes"
+
+  # Business Alerts
+  - alert: TransactionFailureSpike
+    expr: rate(mpesa_transactions_total{status="failed"}[5m]) / rate(mpesa_transactions_total[5m]) > 0.1
+    for: 2m
+    labels:
+      severity: high
+    annotations:
+      summary: "High transaction failure rate"
+      description: "Transaction failure rate is {{ $value | humanizePercentage }} for organization {{ $labels.organization }}"
+
+  - alert: RateLimitExceeded
+    expr: increase(mpesa_rate_limit_hits_total[5m]) > 0
+    for: 0s
+    labels:
+      severity: medium
+    annotations:
+      summary: "Rate limit exceeded"
+      description: "Organization {{ $labels.organization }} exceeded rate limits"
+
+  # System Resource Alerts
+  - alert: HighMemoryUsage
+    expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High memory usage"
+      description: "Memory usage is {{ $value }}%"
+
+  - alert: HighCPUUsage
+    expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High CPU usage"
+      description: "CPU usage is {{ $value }}%"
+
+  - alert: LowDiskSpace
+    expr: (1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)) * 100 > 85
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Low disk space"
+      description: "Disk usage is {{ $value }}% on {{ $labels.mountpoint }}"
+
+---
+
+# ==============================================================================
+# ALERTMANAGER CONFIGURATION
+# ==============================================================================
+# File: monitoring/alertmanager/alertmanager.yml
+
+global:
+  smtp_smarthost: 'localhost:587'
+  smtp_from: 'alerts@mpesa-mcp.com'
+  smtp_auth_username: '${SMTP_USERNAME}'
+  smtp_auth_password: '${SMTP_PASSWORD}'
+
+route:
+  group_by: ['alertname', 'cluster', 'service']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'default'
+  routes:
+  - match:
+      severity: critical
+    receiver: 'critical-alerts'
+  - match:
+      severity: high
+    receiver: 'high-priority-alerts'
+  - match:
+      severity: warning
+    receiver: 'warning-alerts'
+
+receivers:
+- name: 'default'
+  slack_configs:
+  - api_url: '${SLACK_WEBHOOK_URL}'
+    channel: '#mpesa-alerts'
+    title: 'M-Pesa MCP Alert'
+    text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}{{ end }}'
+
+- name: 'critical-alerts'
+  slack_configs:
+  - api_url: '${SLACK_WEBHOOK_URL}'
+    channel: '#mpesa-critical'
+    title: '🚨 CRITICAL: M-Pesa MCP Alert'
+    text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}{{ end }}'
+    color: 'danger'
+  email_configs:
+  - to: 'admin@mpesa-mcp.com'
+    subject: '🚨 CRITICAL Alert: {{ .GroupLabels.alertname }}'
+    body: |
+      {{ range .Alerts }}
+      Alert: {{ .Annotations.summary }}
+      Description: {{ .Annotations.description }}
+      Severity: {{ .Labels.severity }}
+      Time: {{ .StartsAt }}
+      {{ end }}
+
+- name: 'high-priority-alerts'
+  slack_configs:
+  - api_url: '${SLACK_WEBHOOK_URL}'
+    channel: '#mpesa-alerts'
+    title: '⚠️ HIGH: M-Pesa MCP Alert'
+    text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}{{ end }}'
+    color: 'warning'
+
+- name: 'warning-alerts'
+  slack_configs:
+  - api_url: '${SLACK_WEBHOOK_URL}'
+    channel: '#mpesa-alerts'
+    title: '⚡ WARNING: M-Pesa MCP Alert'
+    text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}{{ end }}'
+    color: 'warning'
+
+inhibit_rules:
+- source_match:
+    severity: 'critical'
+  target_match:
+    severity: 'warning'
+  equal: ['alertname', 'cluster', 'service']
+
+---
+
+# ==============================================================================
+# GRAFANA PROVISIONING - DATA SOURCES
+# ==============================================================================
+# File: monitoring/grafana/provisioning/datasources/prometheus.yml
+
+apiVersion: 1
+
+datasources:
+- name: Prometheus
+  type: prometheus
+  access: proxy
+  url: http://prometheus:9090
+  isDefault: true
+  editable: true
+
+---
+
+# ==============================================================================
+# GRAFANA PROVISIONING - DASHBOARDS
+# ==============================================================================
+# File: monitoring/grafana/provisioning/dashboards/dashboards.yml
+
+apiVersion: 1
+
+providers:
+- name: 'default'
+  orgId: 1
+  folder: ''
+  type: file
+  disableDeletion: false
+  updateIntervalSeconds: 10
+  options:
+    path: /var/lib/grafana/dashboards
+
+---
+
+# ==============================================================================
+# GRAFANA DASHBOARD - M-PESA MCP OVERVIEW
+# ==============================================================================
+# File: monitoring/grafana/dashboards/mpesa-mcp-overview.json
+
+{
+  "dashboard": {
+    "id": null,
+    "title": "M-Pesa MCP - System Overview",
+    "tags": ["mpesa", "mcp", "overview"],
+    "style": "dark",
+    "timezone": "browser",
+    "refresh": "30s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Application Health Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"mpesa-mcp\"}",
+            "legendFormat": "App Status"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {
+                "options": {
+                  "0": {
+                    "text": "DOWN",
+                    "color": "red"
+                  },
+                  "1": {
+                    "text": "UP",
+                    "color": "green"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(mpesa_mcp_requests_total[5m])",
+            "legendFormat": "{{method}} {{endpoint}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Requests/sec"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 18, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Response Time (95th percentile)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(mpesa_mcp_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "95th percentile"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Seconds"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(mpesa_mcp_requests_total{status=~\"5..\"}[5m]) / rate(mpesa_mcp_requests_total[5m]) * 100",
+            "legendFormat": "Error Rate %"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Percentage"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "id": 5,
+        "title": "M-Pesa API Calls",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(mpesa_api_calls_total[5m])",
+            "legendFormat": "{{operation}} - {{status}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "id": 6,
+        "title": "Transaction Success Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(mpesa_transactions_total{status=\"completed\"}[5m]) / rate(mpesa_transactions_total[5m]) * 100",
+            "legendFormat": "Success Rate"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 90},
+                {"color": "green", "value": 95}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+      },
+      {
+        "id": 7,
+        "title": "Database Connections",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "mpesa_mcp_active_connections",
+            "legendFormat": "Active Connections"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+      },
+      {
+        "id": 8,
+        "title": "Security Events",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(mpesa_security_events_total[5m])",
+            "legendFormat": "{{event_type}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+      }
+    ]
+  }
+}
+
+---
+
+# ==============================================================================
+# DATABASE INITIALIZATION SCRIPT
+# ==============================================================================
+# File: monitoring/sql/init.sql
+
+-- Monitoring alerts table
+CREATE TABLE IF NOT EXISTS monitoring_alerts (
+    id SERIAL PRIMARY KEY,
+    alert_id VARCHAR(255) UNIQUE NOT NULL,
+    level VARCHAR(20) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    message TEXT NOT NULL,
+    metadata JSONB DEFAULT '{}',
+    resolved BOOLEAN DEFAULT FALSE,
+    resolved_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Index for efficient queries
+CREATE INDEX IF NOT EXISTS idx_monitoring_alerts_level ON monitoring_alerts(level);
+CREATE INDEX IF NOT EXISTS idx_monitoring_alerts_created_at ON monitoring_alerts(created_at);
+CREATE INDEX IF NOT EXISTS idx_monitoring_alerts_resolved ON monitoring_alerts(resolved);
+
+-- Monitoring metrics table for custom metrics
+CREATE TABLE IF NOT EXISTS monitoring_metrics (
+    id SERIAL PRIMARY KEY,
+    metric_name VARCHAR(255) NOT NULL,
+    metric_value NUMERIC NOT NULL,
+    labels JSONB DEFAULT '{}',
+    organization_id INTEGER REFERENCES organizations(id),
+    timestamp TIMESTAMP DEFAULT NOW()
+);
+
+-- Index for metrics queries
+CREATE INDEX IF NOT EXISTS idx_monitoring_metrics_name_timestamp ON monitoring_metrics(metric_name, timestamp);
+CREATE INDEX IF NOT EXISTS idx_monitoring_metrics_organization ON monitoring_metrics(organization_id);
+
+-- Function to clean up old alerts
+CREATE OR REPLACE FUNCTION cleanup_old_alerts()
+RETURNS void AS $
+BEGIN
+    DELETE FROM monitoring_alerts 
+    WHERE resolved = true 
+    AND resolved_at < NOW() - INTERVAL '7 days';
+END;
+$ LANGUAGE plpgsql;
+
+-- Function to clean up old metrics
+CREATE OR REPLACE FUNCTION cleanup_old_metrics()
+RETURNS void AS $
+BEGIN
+    DELETE FROM monitoring_metrics 
+    WHERE timestamp < NOW() - INTERVAL '30 days';
+END;
+$ LANGUAGE plpgsql;
+
+---
+
+# ==============================================================================
+# ENVIRONMENT VARIABLES TEMPLATE
+# ==============================================================================
+# File: .env.monitoring
+
+# Database Configuration
+DATABASE_URL=postgresql://mpesa_user:secure_password@postgres:5432/mpesa_mcp
+DB_USER=mpesa_user
+DB_PASSWORD=secure_password
+
+# Supabase Configuration
+SUPABASE_URL=your_supabase_url
+SUPABASE_KEY=your_supabase_key
+
+# M-Pesa API Configuration
+MPESA_CONSUMER_KEY=your_mpesa_consumer_key
+MPESA_CONSUMER_SECRET=your_mpesa_consumer_secret
+MPESA_ENVIRONMENT=sandbox
+
+# Monitoring Configuration
+PROMETHEUS_PORT=9090
+GRAFANA_PASSWORD=admin123
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/your/webhook/url
+EMAIL_ALERTS_ENABLED=true
+SMS_ALERTS_ENABLED=false
+
+# SMTP Configuration for Email Alerts
+SMTP_USERNAME=your_smtp_username
+SMTP_PASSWORD=your_smtp_password
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+
+# Security
+JWT_SECRET_KEY=your_jwt_secret_key_here
+ENCRYPTION_KEY=your_32_byte_encryption_key_here
+
+---
+
+# ==============================================================================
+# MONITORING DEPLOYMENT SCRIPT
+# ==============================================================================
+# File: deploy-monitoring.sh
+
+#!/bin/bash
+
+echo "🚀 Deploying M-Pesa MCP Monitoring System..."
+
+# Create monitoring directories
+mkdir -p monitoring/{prometheus,grafana/{dashboards,provisioning/{datasources,dashboards}},alertmanager,sql}
+
+# Set permissions
+chmod +x monitoring/
+
+# Copy configuration files
+echo "📋 Setting up configuration files..."
+
+# Start the monitoring stack
+echo "🐳 Starting Docker containers..."
+docker-compose -f docker-compose.monitoring.yml up -d
+
+# Wait for services to be ready
+echo "⏳ Waiting for services to start..."
+sleep 30
+
+# Check service health
+echo "🔍 Checking service health..."
+docker-compose -f docker-compose.monitoring.yml ps
+
+# Display access URLs
+echo "
+✅ Monitoring System Deployed Successfully!
+
+📊 Access URLs:
+- Grafana Dashboard: http://localhost:3000 (admin/admin123)
+- Prometheus: http://localhost:9091
+- AlertManager: http://localhost:9093
+- M-Pesa MCP App: http://localhost:5000
+- Health Check: http://localhost:5000/health
+
+📈 Metrics Endpoint: http://localhost:9090/metrics
+
+🔔 Alerts Configuration:
+- Critical alerts → Slack + Email
+- High priority → Slack
+- Warnings → Slack
+
+📝 Next Steps:
+1. Configure Slack webhook URL in .env.monitoring
+2. Set up email SMTP credentials
+3. Import Grafana dashboards
+4. Configure alert recipients
+5. Test alert notifications
+
+🔧 Management Commands:
+- View logs: docker-compose -f docker-compose.monitoring.yml logs -f
+- Restart: docker-compose -f docker-compose.monitoring.yml restart
+- Stop: docker-compose -f docker-compose.monitoring.yml down
+"
+
+echo "🎉 Monitoring system is ready!"
